@@ -43,8 +43,12 @@ Function ConvertTo-Type {
     switch ($Type) {
         'string'          { $RetVal = @{ 'Value' = [System.Convert]::ToString($Value) ; 'ValueString' = $Value } }
         'Char'            { $RetVal = @{ 'Value' = [System.Convert]::ToChar($Value) ; 'ValueString' = $Value } }
-        'bool'            { $RetVal = @{ 'Value' = [System.Convert]::ToBoolean(($Value -replace '\$',''),$EnUsCulture) ; 'ValueString' = '$' + ([System.Convert]::ToBoolean(($Value -replace '\$',''),$EnUsCulture)).ToString() } }
-        'boolean'         { $RetVal = @{ 'Value' = [System.Convert]::ToBoolean(($Value -replace '\$',''),$EnUsCulture) ; 'ValueString' = '$' + ([System.Convert]::ToBoolean(($Value -replace '\$',''),$EnUsCulture)).ToString() } }
+        'bool'            { $Value = [Ansible.Basic.AnsibleModule]::ParseBool($Value)
+                            $RetVal = @{ 'Value' = [System.Convert]::ToBoolean(($Value -replace '\$',''),$EnUsCulture) ; 'ValueString' = '$' + ([System.Convert]::ToBoolean(($Value -replace '\$',''),$EnUsCulture)).ToString() }
+                          }
+        'boolean'         { $Value = [Ansible.Basic.AnsibleModule]::ParseBool($Value)
+                            $RetVal = @{ 'Value' = [System.Convert]::ToBoolean(($Value -replace '\$',''),$EnUsCulture) ; 'ValueString' = '$' + ([System.Convert]::ToBoolean(($Value -replace '\$',''),$EnUsCulture)).ToString() }
+                          }
         'byte'            { $RetVal = @{ 'Value' = [System.Convert]::ToByte($Value) ; 'ValueString' = $Value } }
         'sbyte'           { $RetVal = @{ 'Value' = [System.Convert]::ToSByte($Value) ; 'ValueString' = $Value } }
         'Int16'           { $RetVal = @{ 'Value' = [System.Convert]::ToInt16($Value) ; 'ValueString' = $Value } }
@@ -62,6 +66,7 @@ Function ConvertTo-Type {
         default           { $RetVal = @{ 'Value' = [System.Convert]::ToString($Value) ; 'ValueString' = $Value } }
     }
 
+    # Return the result: object with Properties: 'Value' of type 'Type'  AND 'ValueString' of type 'String'
     Write-Output $RetVal
 }
 
@@ -87,18 +92,28 @@ $WhatIfMode =  ConvertTo-Type -Value $module.CheckMode -Type 'bool'
 
 $CmdLetToRunGet = "Get-{0} {1}" -f ($CmdLetNoun, $AdditionalParams)
 $CmdLetToRunSet = "<notused>"
-Write-Verbose $CmdLetToRunGet
-$CurResult = Invoke-Expression -Command $CmdLetToRunGet 2>&1
+$module.Debug($CmdLetToRunGet)
+$module.LogEvent($CmdLetToRunGet,'Information',$True)
+Try {
+    $CurResult = Invoke-Expression -Command $CmdLetToRunGet 2>&1
+} catch {
+    $module.LogEvent($CmdLetToRunGet + " -> " + $_.ToString(),'Error',$True)
+    $module.FailJson('Error running ' + $CmdLetToRunGet, $_)
+}
 if ($CurResult) {
     if ($CurResult | Get-Member -Name Exception) {
+        $module.LogEvent($er.Exception.ToString(),'Error',$True)
         $module.FailJson($er.Exception.ToString())
     } else {
         if ($CurResult -is [Object[]]) {
+            $module.LogEvent($CmdLetToRunGet + ' -> Multiple objects where retrieved. Make sure to use the additionalparams argument to specify arguments to only select a single object','Error',$True)
             $module.FailJson('Multiple objects where retrieved. Make sure to use the additionalparams argument to specify arguments to only select a single object')
         } else {
+            # When we want to set a property to a value, we may need to know the type of value to set (string, bool, date etc).
+            # This can be determined when we retrieved the object, then look at the type of that property
             # Now we can determine the type of the property, and convert the value to that type and to string
+            $ParameterObject = $CurResult.psobject.members | Where-Object { $_.Name -eq $Parameter }
             if ($Type -eq 'auto') {
-                $ParameterObject = $CurResult.psobject.members | Where-Object { $_.Name -eq $Parameter }
                 if ($ParameterObject) {
                     $Type = ($CurResult.psobject.members | Where-Object { $_.Name -eq $Parameter } | Select-Object -Property TypeNameOfValue).TypeNameOfValue
                 } else {
@@ -107,45 +122,62 @@ if ($CurResult) {
             }
             $CurValue = ConvertTo-Type -Value $CurResult.$Parameter -Type $Type
             $Value    = ConvertTo-Type -Value $module.Params.value -Type $Type
-            $ret.before = $CurValue.ValueString
+            $ret.before = $CurValue
             #  Make sure to compare the 'real' values against each other. Now they are of the same datatype.
-            if ($CurResult.$Parameter -ne $Value.Value) {
-                Write-Verbose "Changing parameter $Parameter from $($CurResult.$Parameter) to $($Value.ValueString)"
+            if ($CurValue.Value -ne $Value.Value) {
+                $module.Debug("Changing parameter $Parameter from $($CurValue.ValueString) to $($Value.ValueString)")
 
-                # Create a Set-XXX command and execute it.
-                $CmdLetToRunSet = "Set-{0} {1} -$Parameter $($Value.ValueString) -WhatIf:{2}" -f ($CmdLetNoun, $AdditionalParams,$WhatIfMode.ValueString)
-                Write-Verbose $CmdLetToRunSet
-                $er = (Invoke-Expression $CmdLetToRunSet) 2>&1
-                $ret.changed = $True
-                $ret.after   = $Value.ValueString
-                if ($er) {
-                    if ($er | Get-Member -Name Exception) {
-                        $module.FailJson($er.Exception.ToString())
-                        $ret.changed = $False
-                        $ret.after   = $CurValue.ValueString
+                # Make sure the command Set-XXX does contain a parameter -$Parameter
+                if ((Get-Command ('Set-' + $CmdLetNoun)).Parameters.Keys -contains $Parameter) {
+                    # Create a Set-XXX command and execute it.
+                    $CmdLetToRunSet = "Set-{0} {1} -$Parameter $($Value.ValueString) -WhatIf:{2}" -f ($CmdLetNoun, $AdditionalParams,$WhatIfMode.ValueString)
+                    $module.Debug( $CmdLetToRunSet )
+                    $module.LogEvent($CmdLetToRunSet,'Information',$True)
+                    Try {
+                        $er = (Invoke-Expression $CmdLetToRunSet) 2>&1
+                        $ret.changed = $True
+                        $ret.after   = $Value
+                    } catch {
+                        $module.LogEvent($CmdLetToRunGet + " -> " + $_.ToString(),'Error',$True)
+                        $module.FailJson('Error running ' + $CmdLetToRunSet, $_)
                     }
+                    if ($er) {
+                        if ($er | Get-Member -Name Exception) {
+                            $module.LogEvent($er.Exception.ToString(),'Error',$True)
+                            $module.FailJson($er.Exception.ToString())
+                            $ret.changed = $False
+                            $ret.after   = $CurValue
+                        }
+                    }
+                } else {
+                    $module.LogEvent('PowerShell cmdlet Set-' + $CmdLetToRunGet + ' does NOT support a parameter called:' + $Parameter,'Error',$True)
+                    $module.FailJson('PowerShell cmdlet Set-' + $CmdLetToRunGet + ' does NOT support a parameter called:' + $Parameter)
                 }
             } else {
-                Write-Verbose "Parameter $Parameter is already $($CurResult.$Parameter)"
-                $ret.before = $Value.ValueString
-                $ret.after  = $Value.ValueString
+                $module.Debug( "Parameter $Parameter is already $($CurResult.$Parameter)" )
+                $ret.before = $CurValue
+                $ret.after   = $Value
             }
         }
     }
 } else {
+    $module.LogEvent('No object was found','Error',$True)
     $module.FailJson('No object was found')
 }
 
-$module.Diff.before = $ret.before
-$module.Diff.after  = $ret.after
+# Return information
+$module.Diff.before = @{ $CmdLetNoun = @{} }
+if ($ret.before.ValueString) {
+    $module.Diff.before.$CmdLetNoun.$Parameter = $ret.before.Value
+}
+$module.Diff.after = @{ $CmdLetNoun = @{} }
+if ($ret.after.ValueString) {
+    $module.Diff.after.$CmdLetNoun.$Parameter = $ret.after.Value
+}
 
 $module.Result.changed = $ret.changed
-$module.Result.before_value = $ret.before
-$module.Result.value = $ret.after
+$module.Result.before_value = $ret.before.Value
+$module.Result.value = $ret.after.Value
 $module.Result.type = $Type
-$module.Result.WhatIf = $module.CheckMode
-
-$module.Result.CmdLetToRunGet = $CmdLetToRunGet
-$module.Result.CmdLetToRunSet = $CmdLetToRunSet
 
 $module.ExitJson()
