@@ -47,8 +47,8 @@ options:
 notes:
 - This module is using built-in PowerShell cmdlets, where there is both a Get- variant, for getting properties,
   AND a Set- variant to set the property (where currently the Set- cmdlet should support an argumentname that matches the object property just retrieved)
-- The Get-  command should return 1 object (not more, not less)
-- The Object should have a property that matches an argument on the Set- cmdlet
+- The Get-  cmdlet should return 1 object (not more, not less)
+- The returned Object from the Get- cmdlet should have a property that matches an argument on the Set- cmdlet
 - This module broadcasts change events.
 - This module supports check mode via a -WhatIf implementation
 - In the return, C(before_value) and C(value) will be set to the last values.
